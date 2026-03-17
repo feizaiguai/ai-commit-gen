@@ -1,264 +1,232 @@
 #!/usr/bin/env python3
 """
-AI Commit Message Generator
-自动分析 git diff 内容，生成规范的 commit message
-支持 Conventional Commits 格式
+AI Commit Message Generator - 智能提交信息生成器
+分析 git diff 自动生成规范的 commit message
 """
 
-import argparse
-import os
 import subprocess
 import sys
 import re
-from typing import Optional, Dict, List
+from typing import List, Dict, Any
+from colorama import init, Fore, Style
 
-
-class GitDiffAnalyzer:
-    """分析 git diff 内容"""
-    
-    def __init__(self, repo_path: str = "."):
-        self.repo_path = repo_path
-    
-    def get_diff(self, staged_only: bool = False) -> str:
-        """获取 git diff 内容"""
-        try:
-            if staged_only:
-                result = subprocess.run(
-                    ["git", "diff", "--cached"],
-                    cwd=self.repo_path,
-                    capture_output=True,
-                    text=True
-                )
-            else:
-                result = subprocess.run(
-                    ["git", "diff"],
-                    cwd=self.repo_path,
-                    capture_output=True,
-                    text=True
-                )
-            return result.stdout if result.stdout else result.stderr
-        except Exception as e:
-            return f"Error getting diff: {e}"
-    
-    def get_status(self) -> str:
-        """获取 git status"""
-        try:
-            result = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=self.repo_path,
-                capture_output=True,
-                text=True
-            )
-            return result.stdout
-        except Exception as e:
-            return f"Error getting status: {e}"
+init(autoreset=True)
 
 
 class CommitMessageGenerator:
-    """生成 commit message"""
-    
-    CONVENTIONAL_TYPES = {
-        "feat": "新功能",
-        "fix": "修复bug",
-        "docs": "文档更新",
-        "style": "代码格式（不影响功能）",
-        "refactor": "代码重构",
-        "perf": "性能优化",
-        "test": "测试相关",
-        "build": "构建系统或依赖",
-        "ci": "CI配置",
-        "chore": "其他修改",
-        "revert": "回滚"
-    }
+    """提交信息生成器"""
     
     def __init__(self):
-        self.diff_analyzer = GitDiffAnalyzer()
+        self.conventional_types = {
+            'feat': '新功能',
+            'fix': '修复bug',
+            'docs': '文档更新',
+            'style': '代码格式',
+            'refactor': '重构',
+            'perf': '性能优化',
+            'test': '测试相关',
+            'chore': '构建/工具',
+        }
     
-    def analyze_changes(self, diff: str) -> Dict[str, any]:
+    def generate_from_diff(self) -> str:
+        """从 git diff 生成提交信息"""
+        try:
+            result = subprocess.run(
+                ['git', 'diff', '--staged'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            diff = result.stdout
+            
+            if not diff:
+                print(f"{Fore.YELLOW}没有暂存的更改")
+                return ""
+            
+            print(f"{Fore.CYAN}正在分析 git diff...\n")
+            
+            # 分析 diff 内容
+            analysis = self._analyze_diff(diff)
+            
+            # 生成提交信息
+            message = self._generate_message(analysis)
+            
+            return message
+            
+        except subprocess.CalledProcessError:
+            print(f"{Fore.RED}请确保在 git 仓库中运行此命令")
+            return ""
+        except Exception as e:
+            print(f"{Fore.RED}生成失败: {str(e)}")
+            return ""
+    
+    def generate_from_diff_text(self, diff_text: str) -> str:
+        """从提供的 diff 文本生成提交信息"""
+        if not diff_text.strip():
+            print(f"{Fore.YELLOW}diff 内容为空")
+            return ""
+        
+        analysis = self._analyze_diff(diff_text)
+        return self._generate_message(analysis)
+    
+    def _analyze_diff(self, diff: str) -> Dict[str, Any]:
         """分析 diff 内容"""
         analysis = {
-            "added_lines": 0,
-            "deleted_lines": 0,
-            "files_changed": set(),
-            "file_types": set(),
-            "has_tests": False,
-            "has_docs": False,
-            "change_summary": []
+            'type': 'chore',
+            'scope': '',
+            'changes': [],
+            'files': [],
+            'has_tests': False,
+            'has_docs': False,
         }
         
-        # 统计新增和删除的行数
-        analysis["added_lines"] = len(re.findall(r'^\+[^+]', diff, re.MULTILINE))
-        analysis["deleted_lines"] = len(re.findall(r'^-[^-]', diff, re.MULTILINE))
+        lines = diff.split('\n')
+        current_file = None
         
-        # 提取修改的文件
-        file_pattern = r'^\+\+\+ b/(.+)$|^diff --git a/(.+?) b/'
-        files = re.findall(file_pattern, diff, re.MULTILINE)
-        for f in files:
-            filename = f[0] or f[1]
-            if filename:
-                analysis["files_changed"].add(filename)
-                ext = os.path.splitext(filename)[1]
-                if ext:
-                    analysis["file_types"].add(ext)
-                
-                # 检查是否包含测试或文档文件
-                if 'test' in filename.lower() or filename.endswith('_test.py'):
-                    analysis["has_tests"] = True
-                if 'readme' in filename.lower() or filename.endswith('.md'):
-                    analysis["has_docs"] = True
+        for line in lines:
+            # 检测文件变更
+            if line.startswith('+++'):
+                match = re.search(r'\+\+\+ [ab]/(.+)', line)
+                if match:
+                    current_file = match.group(1)
+                    if current_file not in analysis['files']:
+                        analysis['files'].append(current_file)
+            
+            # 检测变更类型
+            if line.startswith('+') and not line.startswith('+++'):
+                change_type = self._classify_change(line)
+                if change_type:
+                    analysis['changes'].append(change_type)
+                    
+                    if 'test' in change_type.lower():
+                        analysis['has_tests'] = True
+                    if 'doc' in change_type.lower():
+                        analysis['has_docs'] = True
+            
+            if line.startswith('-') and not line.startswith('---'):
+                change_type = self._classify_change(line)
+                if change_type:
+                    analysis['changes'].append(change_type)
         
-        # 生成变更摘要
-        for filename in list(analysis["files_changed"])[:10]:
-            analysis["change_summary"].append(f"  - {filename}")
+        # 确定主要类型
+        if analysis['has_docs'] and not analysis['has_tests']:
+            analysis['type'] = 'docs'
+        elif 'feat' in analysis['changes'] or 'function' in analysis['changes']:
+            analysis['type'] = 'feat'
+        elif 'fix' in analysis['changes']:
+            analysis['type'] = 'fix'
+        elif 'style' in analysis['changes']:
+            analysis['type'] = 'style'
+        
+        # 提取范围
+        if analysis['files']:
+            first_file = analysis['files'][0]
+            if '/' in first_file:
+                analysis['scope'] = first_file.split('/')[0]
         
         return analysis
     
-    def determine_type(self, analysis: Dict) -> str:
-        """根据变更内容决定 commit 类型"""
-        files = list(analysis["files_changed"])
+    def _classify_change(self, line: str) -> str:
+        """分类变更内容"""
+        line_lower = line.lower()
         
-        # 检查特定文件类型
-        has_python = any(f.endswith('.py') for f in files)
-        has_js = any(f.endswith(('.js', '.ts', '.jsx', '.tsx')) for f in files)
-        has_docs = any('readme' in f.lower() or f.endswith('.md') for f in files)
-        has_tests = any('test' in f.lower() for f in files)
-        has_config = any(f in ['package.json', 'requirements.txt', 'setup.py', 'Dockerfile'] for f in files)
+        if any(keyword in line_lower for keyword in ['def ', 'class ', 'function ', '=>']):
+            return 'feat'
+        elif any(keyword in line_lower for keyword in ['fix', 'bug', 'error', 'wrong']):
+            return 'fix'
+        elif any(keyword in line_lower for keyword in ['test', 'spec', 'jest', 'pytest']):
+            return 'test'
+        elif any(keyword in line_lower for keyword in ['doc', 'readme', 'comment']):
+            return 'docs'
+        elif any(keyword in line_lower for keyword in ['import', 'require']):
+            return 'chore'
         
-        # 基于文件路径推断类型
-        if any('fix' in f.lower() for f in files if not f.startswith('.')):
-            return "fix"
-        if any('feat' in f.lower() or 'feature' in f.lower() for f in files):
-            return "feat"
-        if has_docs:
-            return "docs"
-        if has_tests and not has_python and not has_js:
-            return "test"
-        if has_config:
-            return "chore"
-        
-        # 默认基于语言
-        if has_python:
-            return "feat"
-        if has_js:
-            return "feat"
-        
-        return "chore"
+        return 'chore'
     
-    def generate_message(self, diff: str, language: str = "en") -> str:
-        """生成 commit message"""
-        analysis = self.analyze_changes(diff)
+    def _generate_message(self, analysis: Dict[str, Any]) -> str:
+        """生成提交信息"""
+        msg_type = analysis['type']
+        scope = analysis.get('scope', '')
         
-        if not analysis["files_changed"]:
-            return "No changes detected" if language == "en" else "未检测到变更"
+        # Conventional Commits 格式
+        header = f"{msg_type}"
+        if scope:
+            header += f"({scope})"
         
-        commit_type = self.determine_type(analysis)
-        type_display = commit_type
-        type_desc = self.CONVENTIONAL_TYPES.get(commit_type, "")
+        # 生成描述
+        description = self._generate_description(analysis)
         
-        # 生成简短描述
-        files = list(analysis["files_changed"])[:5]
-        if len(files) == 1:
-            short_desc = os.path.basename(files[0])
-        else:
-            short_desc = f"{os.path.basename(files[0])} and {len(files)-1} more files"
+        # 生成正文
+        body = self._generate_body(analysis)
         
-        # 构建 commit message
-        message_parts = []
+        # 组装消息
+        message = f"{header}: {description}\n"
+        if body:
+            message += f"\n{body}\n"
         
-        # Header
-        if language == "zh":
-            message_parts.append(f"{type_display}: {short_desc}")
-            message_parts.append("")
-            message_parts.append(f"## 变更内容")
-        else:
-            message_parts.append(f"{type_display}: {short_desc}")
-            message_parts.append("")
-            message_parts.append("## Changes")
+        return message
+    
+    def _generate_description(self, analysis: Dict[str, Any]) -> str:
+        """生成描述"""
+        changes = analysis['changes']
+        files = analysis['files']
         
-        # Body
-        for summary in analysis["change_summary"]:
-            message_parts.append(summary)
+        if not changes and not files:
+            return "更新代码"
         
-        if len(analysis["files_changed"]) > 10:
-            message_parts.append(f"  ... and {len(analysis['files_changed']) - 10} more files")
+        # 简单描述
+        if 'feat' in changes:
+            return f"添加新功能到 {analysis.get('scope', '项目')}"
+        elif 'fix' in changes:
+            return f"修复 {analysis.get('scope', '项目')} 中的问题"
+        elif files:
+            filename = files[0].split('/')[-1]
+            return f"更新 {filename}"
         
-        # Footer - 统计信息
-        message_parts.append("")
-        if language == "zh":
-            message_parts.append(f"## 统计")
-            message_parts.append(f"- 文件数: {len(analysis['files_changed'])}")
-            message_parts.append(f"- 新增行: +{analysis['added_lines']}")
-            message_parts.append(f"- 删除行: -{analysis['deleted_lines']}")
-        else:
-            message_parts.append("## Statistics")
-            message_parts.append(f"- Files: {len(analysis['files_changed'])}")
-            message_parts.append(f"- Added: +{analysis['added_lines']}")
-            message_parts.append(f"- Deleted: -{analysis['deleted_lines']}")
+        return "更新代码"
+    
+    def _generate_body(self, analysis: Dict[str, Any]) -> str:
+        """生成正文"""
+        lines = []
         
-        return "\n".join(message_parts)
+        if analysis['files']:
+            lines.append("### 变更的文件:")
+            for f in analysis['files'][:5]:  # 最多显示5个文件
+                lines.append(f"- {f}")
+        
+        return '\n'.join(lines)
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="AI Commit Message Generator - Generate commit messages from git diff"
-    )
-    parser.add_argument(
-        "--staged", "-s",
-        action="store_true",
-        help="Use staged changes only"
-    )
-    parser.add_argument(
-        "--language", "-l",
-        choices=["en", "zh"],
-        default="en",
-        help="Output language (default: en)"
-    )
-    parser.add_argument(
-        "--copy", "-c",
-        action="store_true",
-        help="Copy message to clipboard"
-    )
-    parser.add_argument(
-        "--path", "-p",
-        default=".",
-        help="Repository path (default: current directory)"
-    )
-    parser.add_argument(
-        "--output", "-o",
-        help="Output file path"
-    )
-    
-    args = parser.parse_args()
-    
-    # 分析 diff
-    analyzer = GitDiffAnalyzer(args.path)
-    diff = analyzer.get_diff(staged_only=args.staged)
-    
-    if not diff.strip():
-        print("No changes detected.", file=sys.stderr)
-        sys.exit(1)
-    
-    # 生成 message
+    """主函数"""
     generator = CommitMessageGenerator()
-    message = generator.generate_message(diff, language=args.language)
     
-    # 输出
-    if args.output:
-        with open(args.output, 'w', encoding='utf-8') as f:
-            f.write(message)
-        print(f"Message saved to {args.output}")
-    else:
-        print(message)
+    print(f"{Fore.CYAN}AI Commit Message Generator")
+    print(f"{Fore.CYAN}{'='*60}\n")
     
-    # 复制到剪贴板
-    if args.copy:
+    if len(sys.argv) > 1:
+        # 从文件读取 diff
         try:
-            import pyperclip
-            pyperclip.copy(message)
-            print("\n✓ Message copied to clipboard!")
-        except ImportError:
-            print("\n⚠ pyperclip not installed. Run: pip install pyperclip")
+            with open(sys.argv[1], 'r', encoding='utf-8') as f:
+                diff_text = f.read()
+            message = generator.generate_from_diff_text(diff_text)
+        except Exception as e:
+            print(f"{Fore.RED}读取文件失败: {str(e)}")
+            sys.exit(1)
+    else:
+        # 从 git 获取 diff
+        message = generator.generate_from_diff()
+    
+    if message:
+        print(f"{Fore.GREEN}生成的提交信息:\n")
+        print(f"{Fore.WHITE}{message}")
+        
+        print(f"\n{Fore.YELLOW}使用方法:")
+        print(f"  git commit -m '{message}'")
+    else:
+        print(f"{Fore.YELLOW}未能生成提交信息")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
